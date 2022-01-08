@@ -1,4 +1,4 @@
-# VoxelRenderer
+# Voxel Tests
 
 This is a test application for my voxel experiments. 
 
