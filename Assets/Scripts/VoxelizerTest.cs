@@ -11,6 +11,7 @@ public class VoxelizerTest : MonoBehaviour
     [Range(0.1f, 40.0f)]
     public float        density = 1.0f;
     public float        triangleScale = 1.0f;
+    public float        gridScale = 1.0f;
 
     [Button("Voxelize")]
     void Voxelize()
@@ -19,7 +20,7 @@ public class VoxelizerTest : MonoBehaviour
 
         Mesh mesh = sourceMesh.sharedMesh;
 
-        var voxelData = MeshTools.Voxelize(mesh, density, triangleScale);
+        var voxelData = MeshTools.Voxelize(mesh, density, triangleScale, gridScale);
 
         voxelObject.gridSize = voxelData.gridSize;
         voxelObject.voxelSize = voxelData.voxelSize;
@@ -47,6 +48,7 @@ public class VoxelizerTest : MonoBehaviour
 
             Mesh   mesh = sourceMesh.sharedMesh;
             Bounds bounds = mesh.bounds;
+            bounds.Expand(bounds.size * gridScale);
 
             Vector3Int gridSize = new Vector3Int(Mathf.CeilToInt(bounds.size.x * density),
                                                  Mathf.CeilToInt(bounds.size.y * density),
