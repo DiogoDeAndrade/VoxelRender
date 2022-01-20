@@ -7,11 +7,26 @@ public class VoxelizerTest : MonoBehaviour
 {
     public MeshFilter   sourceMesh;
     public VoxelObject  voxelObject;
+    public MeshFilter   navMeshDisplay;
     public bool         displayGrid;
     [Range(0.1f, 40.0f)]
     public float        density = 1.0f;
     public float        triangleScale = 1.0f;
     public float        gridScale = 1.0f;
+    public bool         markWalkable = false;
+    [ShowIf("markWalkable")]
+    public float        agentHeight = 2.0f;
+    [ShowIf("markWalkable")]
+    public float        agentStep = 0.2f;
+    [ShowIf("markWalkable")]
+    public float        minRegionAreaPercentage = 0.1f;
+    [ShowIf("markWalkable")]
+    public bool         buildNavMesh = true;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh")]
+    public bool         simplifyNavMesh = true;
+
+    public int          src;
+    public int          dest;
 
     [Button("Voxelize")]
     void Voxelize()
@@ -20,7 +35,74 @@ public class VoxelizerTest : MonoBehaviour
 
         Mesh mesh = sourceMesh.sharedMesh;
 
-        var voxelData = MeshTools.Voxelize(mesh, density, triangleScale, gridScale);
+        var voxelData = VoxelTools.Voxelize(mesh, density, triangleScale, gridScale);
+
+        var t0 = stopwatch.ElapsedMilliseconds;
+        Debug.Log("Voxelization time = " + t0);
+
+        if (markWalkable)
+        {
+            int voxelStep = Mathf.FloorToInt(agentStep / voxelData.voxelSize.y);
+            int voxelMaxHeight = Mathf.CeilToInt(agentHeight / voxelData.voxelSize.y);
+
+            Debug.Log("Voxel Height = " + voxelMaxHeight);
+            Debug.Log("Voxel Step = " + voxelStep);
+
+            t0 = stopwatch.ElapsedMilliseconds;
+            VoxelTools.MarkMinHeight(voxelData, voxelMaxHeight, 2);
+            Debug.Log("Mark min height = " + (stopwatch.ElapsedMilliseconds - t0));
+
+            int countWalkable = VoxelTools.CountVoxel(voxelData, 2);
+            Debug.Log("Walkable area = " + countWalkable + " voxels");
+
+            t0 = stopwatch.ElapsedMilliseconds;
+            var regions = VoxelTools.MarkRegions(voxelData, voxelStep, 2, 32, 36);
+            Debug.Log("Mark regions = " + (stopwatch.ElapsedMilliseconds - t0));
+
+            if (regions != null)
+            {
+                List<int> validVoxels = new List<int>();
+
+                t0 = stopwatch.ElapsedMilliseconds;
+                for (int i = 0; i < regions.Count; i++)
+                {
+                    var r = regions[i];
+                    float p = r.size / (float)countWalkable;
+                    
+                    if (p < minRegionAreaPercentage)
+                    {
+                        Debug.Log("(X) Region " + i + " : Size = " + r.size + " = " + (p * 100.0f) + "%");
+
+                        VoxelTools.FloodFillWithStep(voxelData, voxelStep, r.startX, r.startY, r.startZ, r.voxelId, 1);
+                    }
+                    else
+                    {
+                        Debug.Log("( ) Region " + i + " : Size = " + regions[i].size + " = " + (p * 100.0f) + "%");
+
+                        validVoxels.Add(r.voxelId);
+                    }
+                }
+                Debug.Log("Remove small regions = " + (stopwatch.ElapsedMilliseconds - t0));
+
+                if (buildNavMesh)
+                {
+                    t0 = stopwatch.ElapsedMilliseconds;
+
+                    VoxelNavMesh vnm = new VoxelNavMesh();
+
+                    vnm.Build(voxelData, validVoxels, simplifyNavMesh);
+
+                    if (navMeshDisplay)
+                    {
+                        navMeshDisplay.sharedMesh = vnm.GetMesh();
+                    }
+
+                    Debug.Log("Build navmesh = " + (stopwatch.ElapsedMilliseconds - t0));
+                }
+            }
+        }
+
+        t0 = stopwatch.ElapsedMilliseconds;
 
         voxelObject.gridSize = voxelData.gridSize;
         voxelObject.voxelSize = voxelData.voxelSize;
@@ -34,7 +116,7 @@ public class VoxelizerTest : MonoBehaviour
         }
 
         stopwatch.Stop();
-        Debug.Log("Voxelization time = " + stopwatch.ElapsedMilliseconds);
+        Debug.Log("Mesh generation time = " + (stopwatch.ElapsedMilliseconds - t0));
     }
 
     private void OnDrawGizmosSelected()
@@ -65,6 +147,32 @@ public class VoxelizerTest : MonoBehaviour
                         Gizmos.DrawWireCube(center, new Vector3(voxelSize, voxelSize, voxelSize));
                     }
                 }
+            }
+
+            Gizmos.matrix = prevMatrix;
+        }
+
+        {
+            if (!navMeshDisplay) return;
+
+            Mesh mesh = navMeshDisplay.sharedMesh;
+
+            if (!mesh) return;
+
+            var vertex = mesh.vertices;
+
+            var prevMatrix = Gizmos.matrix;
+            Gizmos.matrix = navMeshDisplay.transform.localToWorldMatrix;
+
+            if (vertex.Length > src)
+            {
+                Gizmos.color = Color.red;
+                Gizmos.DrawSphere(vertex[src], 0.02f);
+            }
+            if (vertex.Length > dest)
+            {
+                Gizmos.color = Color.green;
+                Gizmos.DrawSphere(vertex[dest], 0.02f);
             }
 
             Gizmos.matrix = prevMatrix;
