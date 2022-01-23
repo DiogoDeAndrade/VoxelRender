@@ -5,10 +5,12 @@ using NaughtyAttributes;
 
 public class VoxelizerTest : MonoBehaviour
 {
-    public MeshFilter   sourceMesh;
-    public VoxelObject  voxelObject;
-    public MeshFilter   navMeshDisplay;
-    public bool         displayGrid;
+    public MeshFilter       sourceMesh;
+    public VoxelObject      voxelObject;
+    public MeshFilter       navMeshDisplay;
+    public BoundaryDisplay  boundaryDisplay;
+    public BoundaryDisplay  simplifiedBoundaryDisplay;
+    public bool             displayGrid;
     [Range(0.1f, 40.0f)]
     public float        density = 1.0f;
     public float        triangleScale = 1.0f;
@@ -24,9 +26,14 @@ public class VoxelizerTest : MonoBehaviour
     public bool         buildNavMesh = true;
     [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh")]
     public bool         simplifyNavMesh = true;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh")]
+    public bool         simplifyBoundary = true;
+    [ShowIf(EConditionOperator.And, "markWalkable", "simplifyBoundary")]
+    public float        boundarySimplificationMaxDistance = 0.0f;
 
-    public int          src;
-    public int          dest;
+    public bool         displayVertex = false;
+    [ShowIf("displayVertex")]
+    public int          vertexId = 0;
 
     [Button("Voxelize")]
     void Voxelize()
@@ -39,6 +46,8 @@ public class VoxelizerTest : MonoBehaviour
 
         var t0 = stopwatch.ElapsedMilliseconds;
         Debug.Log("Voxelization time = " + t0);
+
+        boundaryDisplay?.Clear();
 
         if (markWalkable)
         {
@@ -90,7 +99,9 @@ public class VoxelizerTest : MonoBehaviour
 
                     VoxelNavMesh vnm = new VoxelNavMesh();
 
-                    vnm.Build(voxelData, validVoxels, simplifyNavMesh);
+                    vnm.Build(voxelData, validVoxels,
+                              voxelStep * voxelData.voxelSize.y,
+                              simplifyNavMesh, (simplifyNavMesh)?(true):(false));
 
                     if (navMeshDisplay)
                     {
@@ -98,6 +109,30 @@ public class VoxelizerTest : MonoBehaviour
                     }
 
                     Debug.Log("Build navmesh = " + (stopwatch.ElapsedMilliseconds - t0));
+
+                    if (boundaryDisplay)
+                    {
+                        var unsimplifiedMesh = (simplifyNavMesh)?(vnm.GetUnsimplifiedMesh()):(vnm.GetMesh());
+                        if (unsimplifiedMesh)
+                        {
+                            Topology topology = new Topology(unsimplifiedMesh);
+
+                            boundaryDisplay.boundary = topology.GetBoundary();
+
+                            if (simplifyBoundary)
+                            {
+                                if (simplifiedBoundaryDisplay)
+                                {
+                                    simplifiedBoundaryDisplay.boundary = topology.GetBoundary();
+                                    simplifiedBoundaryDisplay.boundary.Simplify(boundarySimplificationMaxDistance);
+                                }
+                                else
+                                {
+                                    boundaryDisplay.boundary.Simplify(boundarySimplificationMaxDistance);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -152,28 +187,16 @@ public class VoxelizerTest : MonoBehaviour
             Gizmos.matrix = prevMatrix;
         }
 
+        if (displayVertex)
         {
-            if (!navMeshDisplay) return;
-
-            Mesh mesh = navMeshDisplay.sharedMesh;
-
-            if (!mesh) return;
-
-            var vertex = mesh.vertices;
-
             var prevMatrix = Gizmos.matrix;
             Gizmos.matrix = navMeshDisplay.transform.localToWorldMatrix;
 
-            if (vertex.Length > src)
-            {
-                Gizmos.color = Color.red;
-                Gizmos.DrawSphere(vertex[src], 0.02f);
-            }
-            if (vertex.Length > dest)
-            {
-                Gizmos.color = Color.green;
-                Gizmos.DrawSphere(vertex[dest], 0.02f);
-            }
+            Mesh mesh = navMeshDisplay.sharedMesh;
+            var  vertices = mesh.vertices;
+
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawSphere(vertices[vertexId], 0.02f);
 
             Gizmos.matrix = prevMatrix;
         }
