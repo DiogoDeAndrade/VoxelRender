@@ -2,9 +2,10 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using NaughtyAttributes;
+using static RcdtcsUnityUtils;
 
 public class VoxelizerTest : MonoBehaviour
-{
+{    
     public MeshFilter       sourceMesh;
     public VoxelObject      voxelObject;
     public MeshFilter       navMeshDisplay;
@@ -25,124 +26,195 @@ public class VoxelizerTest : MonoBehaviour
     [ShowIf("markWalkable")]
     public bool         buildNavMesh = true;
     [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh")]
+    public bool         useRecast = false;
+    private bool        useCustom => !useRecast;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useCustom")]
     public bool         simplifyNavMesh = true;
-    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh")]
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useCustom")]
+    public VoxelNavMesh.TriangulationMesh   simplificationMethod;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useCustom")]
     public bool         simplifyBoundary = true;
-    [ShowIf(EConditionOperator.And, "markWalkable", "simplifyBoundary")]
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "simplifyBoundary", "useCustom")]
     public float        boundarySimplificationMaxDistance = 0.0f;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast")]
+    public float        agentRadius = 0.1f;
 
     public bool         displayVertex = false;
     [ShowIf("displayVertex")]
     public int          vertexId = 0;
 
-    [Button("Voxelize")]
+    [Button("Build")]
     void Voxelize()
     {
         System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
-        Mesh mesh = sourceMesh.sharedMesh;
+        long t0 = 0;
 
-        var voxelData = VoxelTools.Voxelize(mesh, density, triangleScale, gridScale);
-
-        var t0 = stopwatch.ElapsedMilliseconds;
-        Debug.Log("Voxelization time = " + t0);
-
-        boundaryDisplay?.Clear();
-
-        if (markWalkable)
+        if (useRecast)
         {
-            int voxelStep = Mathf.FloorToInt(agentStep / voxelData.voxelSize.y);
-            int voxelMaxHeight = Mathf.CeilToInt(agentHeight / voxelData.voxelSize.y);
-
-            Debug.Log("Voxel Height = " + voxelMaxHeight);
-            Debug.Log("Voxel Step = " + voxelStep);
+            voxelObject.data = null;
 
             t0 = stopwatch.ElapsedMilliseconds;
-            VoxelTools.MarkMinHeight(voxelData, voxelMaxHeight, 2);
-            Debug.Log("Mark min height = " + (stopwatch.ElapsedMilliseconds - t0));
 
-            int countWalkable = VoxelTools.CountVoxel(voxelData, 2);
-            Debug.Log("Walkable area = " + countWalkable + " voxels");
-
-            t0 = stopwatch.ElapsedMilliseconds;
-            var regions = VoxelTools.MarkRegions(voxelData, voxelStep, 2, 32, 36);
-            Debug.Log("Mark regions = " + (stopwatch.ElapsedMilliseconds - t0));
-
-            if (regions != null)
+            if (markWalkable && buildNavMesh)
             {
-                List<int> validVoxels = new List<int>();
+                RecastMeshParams navMeshParams = new RecastMeshParams();
+                navMeshParams.m_agentHeight = agentHeight;
+                navMeshParams.m_agentRadius = agentRadius;
+                navMeshParams.m_agentMaxClimb = agentStep;
+                navMeshParams.m_agentMaxSlope = 45;
+
+                navMeshParams.m_cellSize = 1.0f / density;
+                navMeshParams.m_cellHeight = 1.0f / density;
+
+                navMeshParams.m_regionMinSize = 0;
+                navMeshParams.m_regionMergeSize = 0;
+                navMeshParams.m_monotonePartitioning = false;
+
+                navMeshParams.m_edgeMaxLen = 1;
+                navMeshParams.m_edgeMaxError = 1;
+                navMeshParams.m_vertsPerPoly = 6;
+                navMeshParams.m_detailSampleDist = 1;
+                navMeshParams.m_detailSampleMaxError = 1;
+
+                SystemHelper recast = new SystemHelper();
+
+                recast.SetNavMeshParams(navMeshParams);
+                recast.ClearComputedData();
+                recast.ClearMesh();
+                recast.AddMesh(sourceMesh.sharedMesh, sourceMesh.gameObject);
+                recast.ComputeSystem();
+
+                var t1 = stopwatch.ElapsedMilliseconds;
+                Debug.Log("Navmesh generation = " + t1);
+
+                Mesh navMesh = recast.GetNavMesh(transform.worldToLocalMatrix);
+                if (navMeshDisplay)
+                {
+                    navMeshDisplay.sharedMesh = navMesh;
+                }
+
+                if (simplifiedBoundaryDisplay)
+                {
+                    simplifiedBoundaryDisplay.boundary = null;
+                }
+                if (boundaryDisplay)
+                {
+                    boundaryDisplay.boundary = null;
+
+                    Topology topology = new Topology(navMesh);
+
+                    boundaryDisplay.boundary = topology.GetBoundary();
+                }
+            }
+        }
+        else
+        {
+            Mesh mesh = sourceMesh.sharedMesh;
+
+            var voxelData = VoxelTools.Voxelize(mesh, density, triangleScale, gridScale);
+
+            t0 = stopwatch.ElapsedMilliseconds;
+            Debug.Log("Voxelization time = " + t0);
+
+            boundaryDisplay?.Clear();
+
+            if (markWalkable)
+            {
+                int voxelStep = Mathf.FloorToInt(agentStep / voxelData.voxelSize.y);
+                int voxelMaxHeight = Mathf.CeilToInt(agentHeight / voxelData.voxelSize.y);
+
+                Debug.Log("Voxel Height = " + voxelMaxHeight);
+                Debug.Log("Voxel Step = " + voxelStep);
 
                 t0 = stopwatch.ElapsedMilliseconds;
-                for (int i = 0; i < regions.Count; i++)
+                VoxelTools.MarkMinHeight(voxelData, voxelMaxHeight, 2);
+                Debug.Log("Mark min height = " + (stopwatch.ElapsedMilliseconds - t0));
+
+                int countWalkable = VoxelTools.CountVoxel(voxelData, 2);
+                Debug.Log("Walkable area = " + countWalkable + " voxels");
+
+                t0 = stopwatch.ElapsedMilliseconds;
+                var regions = VoxelTools.MarkRegions(voxelData, voxelStep, 2, 32, 36);
+                Debug.Log("Mark regions = " + (stopwatch.ElapsedMilliseconds - t0));
+
+                if (regions != null)
                 {
-                    var r = regions[i];
-                    float p = r.size / (float)countWalkable;
-                    
-                    if (p < minRegionAreaPercentage)
-                    {
-                        Debug.Log("(X) Region " + i + " : Size = " + r.size + " = " + (p * 100.0f) + "%");
+                    List<int> validVoxels = new List<int>();
 
-                        VoxelTools.FloodFillWithStep(voxelData, voxelStep, r.startX, r.startY, r.startZ, r.voxelId, 1);
-                    }
-                    else
-                    {
-                        Debug.Log("( ) Region " + i + " : Size = " + regions[i].size + " = " + (p * 100.0f) + "%");
-
-                        validVoxels.Add(r.voxelId);
-                    }
-                }
-                Debug.Log("Remove small regions = " + (stopwatch.ElapsedMilliseconds - t0));
-
-                if (buildNavMesh)
-                {
                     t0 = stopwatch.ElapsedMilliseconds;
-
-                    VoxelNavMesh vnm = new VoxelNavMesh();
-
-                    vnm.Build(voxelData, validVoxels,
-                              voxelStep * voxelData.voxelSize.y,
-                              simplifyNavMesh, (simplifyNavMesh)?(true):(false));
-
-                    if (navMeshDisplay)
+                    for (int i = 0; i < regions.Count; i++)
                     {
-                        navMeshDisplay.sharedMesh = vnm.GetMesh();
-                    }
+                        var r = regions[i];
+                        float p = r.size / (float)countWalkable;
 
-                    Debug.Log("Build navmesh = " + (stopwatch.ElapsedMilliseconds - t0));
-
-                    if (boundaryDisplay)
-                    {
-                        var unsimplifiedMesh = (simplifyNavMesh)?(vnm.GetUnsimplifiedMesh()):(vnm.GetMesh());
-                        if (unsimplifiedMesh)
+                        if (p < minRegionAreaPercentage)
                         {
-                            Topology topology = new Topology(unsimplifiedMesh);
+                            Debug.Log("(X) Region " + i + " : Size = " + r.size + " = " + (p * 100.0f) + "%");
 
-                            boundaryDisplay.boundary = topology.GetBoundary();
+                            VoxelTools.FloodFillWithStep(voxelData, voxelStep, r.startX, r.startY, r.startZ, r.voxelId, 1);
+                        }
+                        else
+                        {
+                            Debug.Log("( ) Region " + i + " : Size = " + regions[i].size + " = " + (p * 100.0f) + "%");
 
-                            if (simplifyBoundary)
+                            validVoxels.Add(r.voxelId);
+                        }
+                    }
+                    Debug.Log("Remove small regions = " + (stopwatch.ElapsedMilliseconds - t0));
+
+                    if (buildNavMesh)
+                    {
+                        t0 = stopwatch.ElapsedMilliseconds;
+
+                        VoxelNavMesh vnm = new VoxelNavMesh();
+
+                        vnm.Build(voxelData, validVoxels,
+                                  simplificationMethod, simplifyBoundary,
+                                  voxelStep * voxelData.voxelSize.y,
+                                  simplifyNavMesh, (simplifyNavMesh) ? (true) : (false));
+
+                        if (navMeshDisplay)
+                        {
+                            navMeshDisplay.sharedMesh = vnm.GetMesh();
+                        }
+
+                        Debug.Log("Build navmesh = " + (stopwatch.ElapsedMilliseconds - t0));
+
+                        if (boundaryDisplay)
+                        {
+                            var unsimplifiedMesh = (simplifyNavMesh) ? (vnm.GetUnsimplifiedMesh()) : (vnm.GetMesh());
+                            if (unsimplifiedMesh)
                             {
-                                if (simplifiedBoundaryDisplay)
+                                Topology topology = new Topology(unsimplifiedMesh);
+
+                                boundaryDisplay.boundary = topology.GetBoundary();
+
+                                if (simplifyBoundary)
                                 {
-                                    simplifiedBoundaryDisplay.boundary = topology.GetBoundary();
-                                    simplifiedBoundaryDisplay.boundary.Simplify(boundarySimplificationMaxDistance);
-                                }
-                                else
-                                {
-                                    boundaryDisplay.boundary.Simplify(boundarySimplificationMaxDistance);
+                                    if (simplifiedBoundaryDisplay)
+                                    {
+                                        simplifiedBoundaryDisplay.boundary = topology.GetBoundary();
+                                        simplifiedBoundaryDisplay.boundary.Simplify(boundarySimplificationMaxDistance);
+                                    }
+                                    else
+                                    {
+                                        boundaryDisplay.boundary.Simplify(boundarySimplificationMaxDistance);
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+
+            t0 = stopwatch.ElapsedMilliseconds;
+
+            voxelObject.gridSize = voxelData.gridSize;
+            voxelObject.voxelSize = voxelData.voxelSize;
+            voxelObject.offset = voxelData.offset;
+            voxelObject.data = voxelData.data;
         }
-
-        t0 = stopwatch.ElapsedMilliseconds;
-
-        voxelObject.gridSize = voxelData.gridSize;
-        voxelObject.voxelSize = voxelData.voxelSize;
-        voxelObject.offset = voxelData.offset;
-        voxelObject.data = voxelData.data;
 
         MeshFilter targetMeshFilter = voxelObject.GetComponent<MeshFilter>();
         if (targetMeshFilter)
