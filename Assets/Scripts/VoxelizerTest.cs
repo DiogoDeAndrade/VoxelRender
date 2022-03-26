@@ -37,12 +37,39 @@ public class VoxelizerTest : MonoBehaviour
     [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "simplifyBoundary", "useCustom")]
     public float        boundarySimplificationMaxDistance = 0.0f;
     [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast")]
+    public float        minArea = 1.0f;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast")]
     public float        agentRadius = 0.1f;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast")]
+    public bool         detectInOut = false;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast", "detectInOut")]
+    public float        inOutRange = 0.1f;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast", "detectInOut")]
+    public Vector3      inOutOffsetScale = new Vector3(0.0f, 0.5f, 0.0f);
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast", "detectInOut")]
+    public int          inOutProbeCount = 16;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast", "detectInOut")]
+    public bool         inOutProbeInsideCheck = true;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast", "detectInOut")]
+    public bool         detectInOutProbeDebugView = false;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast", "detectInOut", "detectInOutProbeDebugView")]
+    public int          detectInOutProbeDebugViewEdgeIndex = -1;
+    [ShowIf(EConditionOperator.And, "markWalkable", "buildNavMesh", "useRecast", "detectInOut")]
+    public bool         displayInOut = true;
 
     public bool         displayVertex = false;
     [ShowIf("displayVertex")]
-    public int          vertexId = 0;
+    public int          vertexId = 0;  
 
+    [System.Serializable]
+    struct Edge
+    {
+        public Vector3 p0;
+        public Vector3 p1;
+    }
+
+    [SerializeField, HideInInspector] private List<Edge> inOutEdge;
+     
     [Button("Build")]
     void Voxelize()
     {
@@ -67,7 +94,7 @@ public class VoxelizerTest : MonoBehaviour
                 navMeshParams.m_cellSize = 1.0f / density;
                 navMeshParams.m_cellHeight = 1.0f / density;
 
-                navMeshParams.m_regionMinSize = 0;
+                navMeshParams.m_regionMinSize = minArea;
                 navMeshParams.m_regionMergeSize = 0;
                 navMeshParams.m_monotonePartitioning = false;
 
@@ -105,6 +132,11 @@ public class VoxelizerTest : MonoBehaviour
                     Topology topology = new Topology(navMesh);
 
                     boundaryDisplay.boundary = topology.GetBoundary();
+                }
+
+                if (detectInOut)
+                {
+                    DetectInOut();
                 }
             }
         }
@@ -226,6 +258,103 @@ public class VoxelizerTest : MonoBehaviour
         Debug.Log("Mesh generation time = " + (stopwatch.ElapsedMilliseconds - t0));
     }
 
+    void DetectInOut()
+    {
+        inOutEdge = null;
+
+        Boundary boundary;
+
+        if (inOutRange <= 0) return;
+        if ((boundaryDisplay == null) || (boundaryDisplay.boundary == null))
+        {
+            boundary = new Topology(navMeshDisplay.sharedMesh).GetBoundary();
+        }
+        else
+        {
+            boundary = boundaryDisplay.boundary;
+        }
+
+        if (boundary == null) return;
+
+        inOutEdge = new List<Edge>();
+
+        Mesh mesh = (sourceMesh) ? (sourceMesh.sharedMesh) : (null);
+
+        int triIndex, submeshIndex;
+
+        float step = 2.0f * inOutRange;
+
+        for (int boundaryIndex = 0; boundaryIndex < boundary.Count; boundaryIndex++)
+        {
+            var polyline = boundary.Get(boundaryIndex);
+
+            for (int edgeCount = 0; edgeCount < polyline.Count; edgeCount++)
+            {
+                // Get edge
+                bool validEdge = true;
+
+                var p1 = polyline[edgeCount];
+                var p2 = polyline[(edgeCount + 1) % polyline.Count];
+
+                var edgeDir = p2 - p1;
+                var length = edgeDir.magnitude;
+                edgeDir = edgeDir / length;
+
+                var count = Mathf.CeilToInt(length / step);
+                var inc = length / count;
+
+                var p = p1 + inOutOffsetScale * step;
+                for (int i = 0; i < (count + 1); i++)
+                {
+                    float startAngle = 0;
+                    float endAngle = 360;
+                    float incAngle = (endAngle - startAngle) / inOutProbeCount;
+                    float angle = startAngle;
+                    for (int j = 0; j < inOutProbeCount; j++)
+                    {
+                        Vector3 probeEnd = p + new Vector3(step * Mathf.Cos(Mathf.Deg2Rad * angle),
+                                                            0.0f,
+                                                            step * Mathf.Sin(Mathf.Deg2Rad * angle));
+
+                        angle += incAngle;
+
+                        if (inOutProbeInsideCheck)
+                        {
+                            float d1 = Vector3.Dot(probeEnd - p1, edgeDir);
+                            float d2 = Vector3.Dot(probeEnd - p2, edgeDir);
+
+                            if ((d1 * d2) > 0)
+                            {
+                                continue;
+                            }
+                        }
+
+                        if (mesh)
+                        {
+                            var d = probeEnd - p;
+                            var l = d.magnitude;
+                            d /= l;
+                            if (mesh.Raycast(p, d, l, out submeshIndex, out triIndex))
+                            {
+                                validEdge = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!validEdge) break;
+
+                    p += edgeDir * inc;
+                }
+
+                if (validEdge)
+                {
+                    inOutEdge.Add(new Edge() { p0 = p1, p1 = p2 });
+                }
+            }
+        }
+    }
+
     private void OnDrawGizmosSelected()
     {
         if (!sourceMesh) return;
@@ -271,6 +400,127 @@ public class VoxelizerTest : MonoBehaviour
             Gizmos.DrawSphere(vertices[vertexId], 0.02f);
 
             Gizmos.matrix = prevMatrix;
+        }
+
+        if ((detectInOut) && (detectInOutProbeDebugView) && (inOutRange > 0))
+        {
+            Boundary boundary = null;
+            Mesh     mesh = (sourceMesh)?(sourceMesh.sharedMesh):(null);
+
+            if ((boundaryDisplay) && (boundaryDisplay.boundary != null))
+                boundary = boundaryDisplay.boundary;
+            else if ((simplifiedBoundaryDisplay) && (simplifiedBoundaryDisplay.boundary != null))
+                boundary = simplifiedBoundaryDisplay.boundary;
+            else
+            {
+                boundary = new Topology(navMeshDisplay.sharedMesh).GetBoundary();
+            }
+            
+            if (boundary != null)
+            {
+                int triIndex, submeshIndex;
+                int edgeId = 0;
+
+                float step = 2.0f * inOutRange;
+
+                var prevMatrix = Gizmos.matrix;
+                Gizmos.matrix = sourceMesh.transform.localToWorldMatrix;
+
+                for (int boundaryIndex = 0; boundaryIndex < boundary.Count; boundaryIndex++)
+                {
+                    var polyline = boundary.Get(boundaryIndex);
+
+                    for (int edgeCount = 0; edgeCount < polyline.Count; edgeCount++)
+                    {
+                        edgeId++;
+
+                        if (detectInOutProbeDebugViewEdgeIndex != -1)
+                        {
+                            if (edgeId != detectInOutProbeDebugViewEdgeIndex) continue;
+                        }
+
+                        // Get edge
+                        var p1 = polyline[edgeCount];
+                        var p2 = polyline[(edgeCount + 1) % polyline.Count];
+
+                        var edgeDir = p2 - p1;
+                        var length = edgeDir.magnitude;
+                        edgeDir = edgeDir / length;
+
+                        var count = Mathf.CeilToInt(length / step);
+                        var inc = length / count;
+
+                        var   p = p1 + inOutOffsetScale * step;
+                        for (int i = 0; i < (count + 1); i++)
+                        {
+                            float startAngle = 0;
+                            float endAngle = 360;
+                            float incAngle = (endAngle - startAngle) / inOutProbeCount;
+                            float angle = startAngle;
+                            for (int j = 0; j < inOutProbeCount; j++)
+                            {
+                                Vector3 probeEnd = p + new Vector3(step * Mathf.Cos(Mathf.Deg2Rad * angle),
+                                                                   0.0f,
+                                                                   step * Mathf.Sin(Mathf.Deg2Rad * angle));
+
+                                angle += incAngle;
+
+                                if (inOutProbeInsideCheck)
+                                {
+                                    float d1 = Vector3.Dot(probeEnd - p1, edgeDir);
+                                    float d2 = Vector3.Dot(probeEnd - p2, edgeDir);
+
+                                    if ((d1 * d2) > 0)
+                                    {
+                                        continue;
+                                    }
+                                }
+
+                                if (mesh)
+                                {
+                                    var d = probeEnd - p;
+                                    var l = d.magnitude;
+                                    d /= l;
+                                    if (mesh.Raycast(p, d, l, out submeshIndex, out triIndex))
+                                    {
+                                        var triangle = mesh.GetTriangle(submeshIndex, triIndex);
+
+                                        Gizmos.color = Color.yellow;
+                                        Gizmos.DrawLine(triangle.GetVertex(0), triangle.GetVertex(1));
+                                        Gizmos.DrawLine(triangle.GetVertex(1), triangle.GetVertex(2));
+                                        Gizmos.DrawLine(triangle.GetVertex(2), triangle.GetVertex(0));
+
+                                        Gizmos.color = Color.red;
+                                    }
+                                    else Gizmos.color = Color.green;
+                                }
+                                else Gizmos.color = Color.yellow;
+
+                                Gizmos.DrawLine(p, probeEnd);
+                            }
+
+                            p += edgeDir * inc;
+                        }
+
+                        edgeId++;
+                    }
+                }
+
+                Gizmos.matrix = prevMatrix;
+            }
+        }
+        
+        if ((displayInOut) && (inOutEdge != null))
+        {
+            var prevMatrix = UnityEditor.Handles.matrix;
+            UnityEditor.Handles.matrix = navMeshDisplay.transform.localToWorldMatrix;
+
+            foreach (var edge in inOutEdge)
+            {
+                UnityEditor.Handles.DrawBezier(edge.p0, edge.p1, edge.p0, edge.p1, Color.red, null, 15.0f);
+            }
+
+            UnityEditor.Handles.matrix = prevMatrix;
         }
     }
 }
