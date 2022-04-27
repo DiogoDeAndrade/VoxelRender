@@ -5,7 +5,8 @@ using UnityEngine;
 public class BoundaryDisplay : MonoBehaviour
 {
     public Boundary boundary;
-    public Color    color = Color.green;
+    public Color    cwColor = Color.green;
+    public Color    ccwColor = Color.green;
     public int      vertexCount;
 
     public void Clear()
@@ -17,8 +18,6 @@ public class BoundaryDisplay : MonoBehaviour
     {
         if (boundary == null) return;
 
-        Gizmos.color = color;
-
         var prevMatrix = Gizmos.matrix;
         Gizmos.matrix = transform.localToWorldMatrix;
 
@@ -27,6 +26,10 @@ public class BoundaryDisplay : MonoBehaviour
         for (int i = 0; i < boundary.Count; i++)
         {
             var polyline = boundary.Get(i);
+
+            if (polyline.isCW()) Gizmos.color = cwColor;
+            else Gizmos.color = ccwColor;
+
             int count = polyline.Count;
             for (int j = 0; j < count; j++)
             {

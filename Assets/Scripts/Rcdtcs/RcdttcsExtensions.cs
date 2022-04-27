@@ -6,7 +6,7 @@ using static Recast;
 
 public static class RcdttcsExtensions 
 {
-    public static Mesh GetNavMesh(this SystemHelper recast, Matrix4x4 transform)
+    public static Mesh GetPolyMesh(this SystemHelper recast, Matrix4x4 transform)
     {
         rcPolyMesh polyMesh = recast.m_pmesh;
 
@@ -65,6 +65,49 @@ public static class RcdttcsExtensions
         for (int j = 0; j < vertices.Count; j++)
         {
             vertices[j] = transform * vertices[j].xyz1();
+        }
+
+        var mesh = new Mesh();
+        mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+        mesh.SetVertices(vertices);
+        mesh.SetTriangles(tris, 0);
+        mesh.RecalculateBounds();
+        mesh.RecalculateNormals();
+        mesh.RecalculateTangents();
+
+        return mesh;
+    }
+
+    public static Mesh GetDetailMesh(this SystemHelper recast, Matrix4x4 transform)
+    {
+        rcPolyMeshDetail polyMesh = recast.m_dmesh;
+
+        List<Vector3> vertices = new List<Vector3>();
+        List<int> tris = new List<int>();
+
+        for (int i = 0; i < polyMesh.nverts; i++)
+        {
+            int vIndex = i * 3;
+            Vector3 vertex = new Vector3(polyMesh.verts[vIndex + 0],
+                                         polyMesh.verts[vIndex + 1] + 0.001f,
+                                         polyMesh.verts[vIndex + 2]);
+
+            vertices.Add(transform * vertex.xyz1());
+        }
+
+        for (int i = 0; i < polyMesh.nmeshes; i++)
+        {
+            int mIndex = i * 4;
+            int bverts = (int)polyMesh.meshes[mIndex + 0];
+            int btris = (int)polyMesh.meshes[mIndex + 2];
+            int ntris = (int)polyMesh.meshes[mIndex + 3];
+            int trisIndex = btris * 4;
+            for (int j = 0; j < ntris; j++)
+            {
+                tris.Add(bverts + polyMesh.tris[trisIndex + j * 4 + 0]);
+                tris.Add(bverts + polyMesh.tris[trisIndex + j * 4 + 1]);
+                tris.Add(bverts + polyMesh.tris[trisIndex + j * 4 + 2]);
+            }
         }
 
         var mesh = new Mesh();
