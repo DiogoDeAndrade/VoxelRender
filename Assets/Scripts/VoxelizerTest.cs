@@ -93,6 +93,15 @@ public class VoxelizerTest : MonoBehaviour
     public float        directionAngleTolerance = 5;
     [ShowIf("shouldMatchSourceGeometry")]
     public float        normalAngleTolerance = 45;
+    [ShowIf("shouldMatchSourceGeometry")]
+    public bool         mergeCandidates = true;
+    [ShowIf("shouldDetectInOut")]
+    public bool         mergeEdges;
+    private bool        shouldMergeEdges => mergeEdges && shouldDetectInOut;
+    [ShowIf("shouldMergeEdges")]
+    public float        mergeAngleTolerance = 10;
+    [ShowIf("shouldMergeEdges")]
+    public float        mergeDistanceTolerance = 0.25f;
 
     public bool         displayVertex = false;
     [ShowIf("displayVertex")]
@@ -112,7 +121,21 @@ public class VoxelizerTest : MonoBehaviour
     [ShowIf("debugEdges")]
     public int          debugSubEdgeId = -1;
 
-    private List<Vector3>   samplePoints;
+    class SamplePoint
+    {
+        public int     sampleId;
+        public Vector3 position;
+        public Vector3 normal;
+        public int     sourceEdgeId;
+        public bool    canStart;
+        public bool    canEnd;
+    }
+    struct SampleList
+    {
+        public bool                isCW;
+        public List<SamplePoint>   points;
+    }
+    private List<SampleList>   samplePoints;
 
 
 
@@ -135,9 +158,7 @@ public class VoxelizerTest : MonoBehaviour
         public  float   dist;
         public  bool    hit;
         public  float   t;
-        public  Mesh    mesh;
-        public  int     submeshId;
-        public  int     triId;
+        public  Triangle triangle;
     }
     private List<DebugRay> debugRays = new List<DebugRay>();
 
@@ -150,6 +171,8 @@ public class VoxelizerTest : MonoBehaviour
         public int      subEdgeId;
     }
     private List<DebugEdge> debugEdgeList = new List<DebugEdge>();
+
+    MeshOctree meshOctree;
 
     [Button("Build")]
     void Voxelize()
@@ -168,7 +191,14 @@ public class VoxelizerTest : MonoBehaviour
 
             if (markWalkable && buildNavMesh && (sourceMesh != null))
             {
-                UnityEditor.EditorUtility.DisplayProgressBar("Building...", "Creating nav mesh...", 0.0f);
+                UnityEditor.EditorUtility.DisplayProgressBar("Building...", "Creating mesh octree...", 0.0f);
+
+                meshOctree = sourceMesh.sharedMesh.GetOctree();
+
+                var t1 = stopwatch.ElapsedMilliseconds;
+                Debug.Log($"Mesh octree construction time = {t1 - t0} ms");
+
+                UnityEditor.EditorUtility.DisplayProgressBar("Building...", "Creating nav mesh...", 0.1f);
 
                 RecastMeshParams navMeshParams = new RecastMeshParams();
                 navMeshParams.m_cellSize = 1.0f / density;
@@ -199,8 +229,8 @@ public class VoxelizerTest : MonoBehaviour
                 recast.AddMesh(sourceMesh.sharedMesh, sourceMesh.gameObject);
                 recast.ComputeSystem();
 
-                var t1 = stopwatch.ElapsedMilliseconds;
-                Debug.Log("Navmesh generation = " + t1);
+                var t2 = stopwatch.ElapsedMilliseconds;
+                Debug.Log("Navmesh generation = " + (t2 - t1));
 
                 Mesh navMesh = recast.GetPolyMesh(transform.worldToLocalMatrix);
                 if (navMeshDisplay)
@@ -234,14 +264,25 @@ public class VoxelizerTest : MonoBehaviour
                     }
                     else
                     {
+                        long dioc0 = stopwatch.ElapsedMilliseconds;
                         DetectInOutContinuous();
+                        long dioc1 = stopwatch.ElapsedMilliseconds;
+                        Debug.Log($"Detect In Out Time = {dioc1 - dioc0} ms");
                     }
 
-                    UnityEditor.EditorUtility.DisplayProgressBar("Building...", "Matching source geometry...", 0.75f);
+                    UnityEditor.EditorUtility.DisplayProgressBar("Building...", "Matching source geometry...", 0.76f);
 
                     if (matchSourceGeometry)
                     {
+                        long msg0 = stopwatch.ElapsedMilliseconds;
                         MatchSourceGeometry();
+                        long msg1= stopwatch.ElapsedMilliseconds;
+                        Debug.Log($"Match source geometry = {msg1 - msg0} ms");
+                    }
+
+                    if (shouldMergeEdges)
+                    {
+                        MergeEdges();
                     }
                 }
                 else
@@ -475,9 +516,7 @@ public class VoxelizerTest : MonoBehaviour
                                     dist = l,
                                     hit = b,
                                     t = float.MaxValue,
-                                    mesh = mesh,
-                                    submeshId = submeshIndex,
-                                    triId = triIndex
+                                    triangle = mesh.GetTriangle(submeshIndex, triIndex)
                                 });
                             }
 
@@ -531,9 +570,7 @@ public class VoxelizerTest : MonoBehaviour
                                 dist = l,
                                 hit = b,
                                 t = float.MaxValue,
-                                mesh = mesh,
-                                submeshId = submeshIndex,
-                                triId = triIndex
+                                triangle = mesh.GetTriangle(submeshIndex, triIndex)
                             });
                         }
 
@@ -558,9 +595,9 @@ public class VoxelizerTest : MonoBehaviour
     }
 
 
-    bool CanReachInfiniteCircular(Mesh mesh, Vector3 pt, float range, Vector3 mainDir, Vector3 forwardDir)
+    bool CanReachInfiniteCircular(MeshOctree meshOctree, Vector3 pt, float range, Vector3 mainDir, Vector3 forwardDir)
     {
-        if (mesh == null) return true;
+        if (meshOctree == null) return true;
 
         Vector3 cosDir = Vector3.right;
         Vector3 sinDir = Vector3.forward;
@@ -587,11 +624,11 @@ public class VoxelizerTest : MonoBehaviour
             if (mdp <= 0.001) continue;
             if (pdp <= 0.001) continue;
 
-            int submeshIndex;
-            int triIndex;
-            var d = probeEnd - pt;
+            Triangle triangle = null;
+            float    t = float.MaxValue;
+            var      d = probeEnd - pt;
             d /= l;
-            bool b = mesh.Raycast(pt, d, l, out submeshIndex, out triIndex);
+            bool b = meshOctree.Raycast(pt, d, l, ref triangle, ref t);
 
             if (debugRayExteriorTest)
             {
@@ -603,9 +640,7 @@ public class VoxelizerTest : MonoBehaviour
                     dist = l,
                     hit = b,
                     t = float.MaxValue,
-                    mesh = mesh,
-                    submeshId = submeshIndex,
-                    triId = triIndex
+                    triangle = triangle
                 });//*/
             }
 
@@ -615,19 +650,19 @@ public class VoxelizerTest : MonoBehaviour
         return true;
     }
 
-    bool CanReachInfinitePerpendicular(Mesh mesh, Vector3 pt0, Vector3 pt1, float range, Vector3 forwardDir)
+    bool CanReachInfinitePerpendicular(MeshOctree meshOctree, Vector3 pt0, Vector3 pt1, float range, Vector3 forwardDir)
     {
-        if (mesh == null) return true;
+        if (meshOctree == null) return true;
 
         Vector3 pt = pt0;
         Vector3 ptInc = (pt1 - pt0) / inOutProbeCount;
 
         for (int i = 0; i < inOutProbeCount; i++)
         {
-            int submeshIndex;
-            int triIndex;
+            Triangle triangle = null;
+            float    t = float.MaxValue;
 
-            bool b = mesh.Raycast(pt, forwardDir, range, out submeshIndex, out triIndex);
+            bool b = meshOctree.Raycast(pt, forwardDir, range, ref triangle, ref t);
 
             if (debugRayExteriorTest)
             {
@@ -639,9 +674,7 @@ public class VoxelizerTest : MonoBehaviour
                     dist = range,
                     hit = b,
                     t = float.MaxValue,
-                    mesh = mesh,
-                    submeshId = submeshIndex,
-                    triId = triIndex
+                    triangle = triangle
                 });//*/
             }
 
@@ -653,7 +686,7 @@ public class VoxelizerTest : MonoBehaviour
         return true;
     }
 
-    bool CircularRaycast(Mesh mesh, Vector3 pt, float range, Vector3 edgeDir, Vector3 perpDir, bool isFirst, bool isLast, int sampleId)
+    bool CircularRaycast(MeshOctree mesh, Vector3 pt, float range, Vector3 edgeDir, Vector3 perpDir, bool isFirst, bool isLast, int sampleId)
     {
         Vector3 cosDir = Vector3.right;
         Vector3 sinDir = Vector3.forward;
@@ -681,15 +714,15 @@ public class VoxelizerTest : MonoBehaviour
                 if ((isLast) && (Vector3.Dot(probeEnd - pt, edgeDir) > 0)) continue;
             }
 
-            if (mesh)
+            if (mesh != null)
             {
-                int submeshIndex;
-                int triIndex;
+                Triangle triangle = null;
+                float    t = float.MaxValue;
                 var d = probeEnd - pt;
                 d /= l;
-                bool b = mesh.Raycast(pt, d, l, out submeshIndex, out triIndex);
+                bool b = mesh.Raycast(pt, d, l, ref triangle, ref t);
 
-                if ((debugSamplePoints) &&
+                if ((sampleId != -1) && (debugSamplePoints) &&
                     ((debugSampleId < 0) || (debugSampleId == sampleId)))
                 {
                     debugRays.Add(new DebugRay()
@@ -699,10 +732,8 @@ public class VoxelizerTest : MonoBehaviour
                         dir = d,
                         dist = l,
                         hit = b,
-                        t = float.MaxValue,
-                        mesh = mesh,
-                        submeshId = submeshIndex,
-                        triId = triIndex
+                        t = t,
+                        triangle = triangle
                     });
                 }
 
@@ -735,8 +766,6 @@ public class VoxelizerTest : MonoBehaviour
 
         inOutEdge = new List<Edge>();
 
-        Mesh mesh = (sourceMesh) ? (sourceMesh.sharedMesh) : (null);
-
         float step = agentRadius;
         float angleTolerance = Mathf.Cos(inOutSampleDirTolerance * Mathf.Deg2Rad);
 
@@ -751,7 +780,7 @@ public class VoxelizerTest : MonoBehaviour
         int sampleId = 0;
         //debugCount = 0;
 
-        samplePoints = new List<Vector3>();
+        samplePoints = new List<SampleList>();
 
         for (int boundaryIndex = 0; boundaryIndex < boundary.Count; boundaryIndex++)
         {
@@ -759,20 +788,18 @@ public class VoxelizerTest : MonoBehaviour
 
             bool isCW = polyline.isCW();
 
-            bool    edgeStarted = false;
-            Vector3 candidateEdgeStart = Vector3.zero;
-            Vector3 candidateEdgeStartNormal = Vector3.zero;
-            int     candidateEdgeStartSampleId = -1;
-            Vector3 candidateEdgeEnd = Vector3.zero;
-            Vector3 candidateEdgeEndNormal = Vector3.zero;
-            int     candidateEdgeEndSampleId = -1;
-            Vector3 candidateEdgeDir = Vector3.zero;
+            var currentSamplePointList = new List<SamplePoint>();
 
             for (int edgeCount = 0; edgeCount < polyline.Count; edgeCount++)
             {
                 edgeId++;
 
-                UnityEditor.EditorUtility.DisplayProgressBar("Building...", "Detecting in/out...", 0.25f + 0.5f * (float)edgeId / totalEdges);
+                if (edgeId == detectInOutProbeDebugViewEdgeIndex)
+                {
+                    Debug.Break();
+                }
+
+                UnityEditor.EditorUtility.DisplayProgressBar("Building...", $"Sampling in/out ({edgeId} of {totalEdges})", 0.25f + 0.45f * (float)edgeId / totalEdges);
 
                 var p1 = polyline[edgeCount];
                 var p2 = polyline[(edgeCount + 1) % polyline.Count];
@@ -792,104 +819,114 @@ public class VoxelizerTest : MonoBehaviour
 
                 while (Vector3.Dot((pt - p2).normalized, edgeDir) < 0)
                 {
-                    if ((debugSamplePoints) && ((sampleId == debugSampleId) || (debugSampleId < 0)))
+                    sampleId++;
+
+                    bool canStart = CircularRaycast(meshOctree, pt, step, edgeDir, Vector3.Cross(edgeDir, nNorm), true, false, sampleId);
+                    bool canEnd = CircularRaycast(meshOctree, pt, step, edgeDir, Vector3.Cross(edgeDir, nNorm), false, true, sampleId);
+
+                    currentSamplePointList.Add(new SamplePoint
                     {
-                        samplePoints.Add(pt);
-                    }
-
-                    // Do the raycast for this vertex
-                    bool noHit = CircularRaycast(mesh, pt, step, edgeDir, Vector3.Cross(edgeDir, nNorm), !edgeStarted, false, sampleId);
-                    if (noHit)
-                    {
-                        if (!edgeStarted)
-                        {
-                            edgeStarted = true;
-                            candidateEdgeStart = candidateEdgeEnd = pt;
-                            candidateEdgeStartNormal = candidateEdgeEndNormal = nNorm;
-                            candidateEdgeStartSampleId = sampleId;
-                            candidateEdgeDir = Vector3.zero;
-                        }
-                        else
-                        {
-                            if (candidateEdgeDir.magnitude == 0)
-                            {
-                                candidateEdgeEnd = pt;
-                                candidateEdgeEndNormal = nNorm;
-                                candidateEdgeEndSampleId = sampleId;
-                                candidateEdgeDir = (candidateEdgeEnd - candidateEdgeStart).normalized;
-                            }
-                            else
-                            {
-                                Vector3 newDir = (pt - candidateEdgeEnd).normalized;
-
-                                if (Vector3.Dot(newDir, candidateEdgeDir) < angleTolerance)
-                                {
-                                    // Edge direction changed, add the current edge and start a new one
-                                    AddInOutEdge(mesh, candidateEdgeStart, candidateEdgeEnd, candidateEdgeStartNormal, candidateEdgeEndNormal, isCW);
-
-                                    candidateEdgeStart = candidateEdgeEnd;
-                                    candidateEdgeStartNormal = candidateEdgeEndNormal;
-                                    candidateEdgeStartSampleId = candidateEdgeEndSampleId;
-                                    candidateEdgeEnd = pt;
-                                    candidateEdgeEndNormal = nNorm;
-                                    candidateEdgeEndSampleId = sampleId;
-                                    candidateEdgeDir = (candidateEdgeEnd - candidateEdgeStart).normalized;
-                                }
-                                else
-                                {
-                                    // Continue edge
-                                    candidateEdgeEnd = pt;
-                                    candidateEdgeEndNormal = nNorm;
-                                    candidateEdgeEndSampleId = sampleId;
-                                    candidateEdgeDir = (candidateEdgeEnd - candidateEdgeStart).normalized;
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        if (edgeStarted)
-                        {
-                            // We got a hit, check if it's a potential end
-                            var endDir = (pt - candidateEdgeStart);
-                            if (endDir.magnitude != 0) endDir.Normalize();
-
-                            if (CircularRaycast(mesh, pt, step, endDir, Vector3.Cross(endDir, nNorm), false, true, sampleId))
-                            {
-                                // This one is a valid end, add it and reset state to search for a new start
-                                candidateEdgeEnd = pt;
-                                candidateEdgeEndNormal = nNorm;
-                                candidateEdgeEndSampleId = sampleId;
-                                candidateEdgeDir = (candidateEdgeEnd - candidateEdgeStart).normalized;
-
-                                AddInOutEdge(mesh, candidateEdgeStart, candidateEdgeEnd, candidateEdgeStartNormal, candidateEdgeEndNormal, isCW);
-                            }
-                            else
-                            {
-                                // This one isn't valid as a terminal, so add the current end as the actual end
-                                AddInOutEdge(mesh, candidateEdgeStart, candidateEdgeEnd, candidateEdgeStartNormal, candidateEdgeEndNormal, isCW);
-                            }
-
-                            // Check if this one can be the start of a new edge
-                            if (CircularRaycast(mesh, pt, step, edgeDir, nNorm, true, false, sampleId))
-                            {
-                                candidateEdgeStart = candidateEdgeEnd = pt;
-                                candidateEdgeStartNormal = candidateEdgeEndNormal = nNorm;
-                                candidateEdgeStartSampleId = sampleId;
-                                candidateEdgeDir = Vector3.zero;
-                            }
-                            else
-                            {
-                                edgeStarted = false;
-                            }
-                        }
-                    }
+                        sampleId = sampleId,
+                        position = pt,
+                        normal = n,
+                        sourceEdgeId = edgeId,
+                        canStart = canStart,
+                        canEnd = canEnd
+                    });
 
                     pt = pt + edgeDir * inOutSampleLength;
                     n = n + nInc * inOutSampleLength;
                     nNorm = n.normalized;
 
-                    sampleId++;
+                    //if (currentSamplePointList.Count == 10) return;
+                }
+            }
+
+            if (currentSamplePointList.Count > 0)
+            {
+                samplePoints.Add(new SampleList() { points = currentSamplePointList, isCW = isCW });
+            }
+        }
+
+        int sampleCount = sampleId;
+        sampleId = 0;
+
+        // Sampling done
+        // Run through the lists and create candidate edges
+        foreach (var sampleList in samplePoints)
+        {
+            SamplePoint startPoint = null;
+            SamplePoint endPoint = null;
+
+            for (int i = 0; i < sampleList.points.Count; i++)
+            {
+                sampleId++;
+
+                UnityEditor.EditorUtility.DisplayProgressBar("Building...", "Detecting in/out...", 0.7f + 0.05f * sampleId / sampleCount);
+
+                var currentSample = sampleList.points[i];
+
+                if (startPoint != null)
+                {
+                    if (endPoint != null)
+                    {
+                        var edgeDir = (endPoint.position - startPoint.position).normalized;
+                        var currentDir = (currentSample.position - endPoint.position).normalized;
+
+                        if (Vector3.Dot(currentDir, edgeDir) < angleTolerance)
+                        {
+                            // There was a shift in direction on this point, add the valid edge
+                            AddInOutEdge(meshOctree, startPoint.position, endPoint.position, startPoint.normal, endPoint.normal, sampleList.isCW);
+
+                            // The endpoint could have been a start point as well, so we continue from there
+                            startPoint = endPoint;
+                            endPoint = null;
+                        }
+                    }
+
+                    if (currentSample.canStart)
+                    {
+                        if (currentSample.canEnd)
+                        {
+                            // This point can continue the edge (can be start and end)
+                            endPoint = currentSample;
+                        }
+                        else
+                        {
+                            // It could be a start point, but it can't be an end point, so create the edge that was already built
+                            // and start a new one
+                            if (endPoint != null)
+                            {
+                                AddInOutEdge(meshOctree, startPoint.position, endPoint.position, startPoint.normal, endPoint.normal, sampleList.isCW);
+                            }
+
+                            startPoint = currentSample;
+                            endPoint = null;
+                        }
+                    }
+                    else
+                    {
+                        if (currentSample.canEnd)
+                        {
+                            // This point can end the edge, so set it as an endpoint
+                            endPoint = currentSample;
+                        }
+                        // Add the edge (which can include the above point or not)
+                        if (endPoint != null)
+                        {
+                            AddInOutEdge(meshOctree, startPoint.position, endPoint.position, startPoint.normal, endPoint.normal, sampleList.isCW);
+                        }
+                        // Start a new edge
+                        startPoint = endPoint = null;
+                    }
+                }
+                else
+                {
+                    if (currentSample.canStart)
+                    {
+                        // Start the edge
+                        startPoint = currentSample;
+                    }
                 }
             }
         }
@@ -900,7 +937,7 @@ public class VoxelizerTest : MonoBehaviour
     public int addedEdgeTest = 0;
     [ReadOnly] public string rejectionCause;*/
 
-    bool AddInOutEdge(Mesh mesh, Vector3 p0, Vector3 p1, Vector3 n1, Vector3 n2, bool isCW)
+    bool AddInOutEdge(MeshOctree mesh, Vector3 p0, Vector3 p1, Vector3 n1, Vector3 n2, bool isCW)
     {
         // Check if the edge is larger than the agent radius (smaller size for a connecting edge)
         if (Vector3.Distance(p0, p1) < agentRadius) return false;
@@ -930,7 +967,7 @@ public class VoxelizerTest : MonoBehaviour
                 main_dir = (p1 - p0).normalized;
                 perp_dir = Vector3.Cross(main_dir, normal);
                 //if (isCW) perp_dir = -perp_dir;
-                if (!CanReachInfinitePerpendicular(mesh, p0, p1, 4 * agentRadius, perp_dir))
+                if (!CanReachInfinitePerpendicular(meshOctree, p0, p1, 4 * agentRadius, perp_dir))
                 {
                     //rejectionCause = "Interior segment";
                     return false;
@@ -941,13 +978,13 @@ public class VoxelizerTest : MonoBehaviour
                 main_dir = (p1 - p0).normalized;
                 perp_dir = Vector3.Cross(main_dir, normal) * raycastInteriorEdgeExcentricity;
                 //if (isCW) perp_dir = -perp_dir;
-                if (!CanReachInfiniteCircular(mesh, p0, 4 * agentRadius, main_dir, perp_dir))
+                if (!CanReachInfiniteCircular(meshOctree, p0, 4 * agentRadius, main_dir, perp_dir))
                 {
                     //rejectionCause = "Interior segment (1)";
                     return false;
                 }
                 main_dir =-main_dir;
-                if (!CanReachInfiniteCircular(mesh, p1, 4 * agentRadius, main_dir, perp_dir))
+                if (!CanReachInfiniteCircular(meshOctree, p1, 4 * agentRadius, main_dir, perp_dir))
                 {
                     //rejectionCause = "Interior segment (2)";
                     return false;
@@ -982,30 +1019,39 @@ public class VoxelizerTest : MonoBehaviour
             if (isCW) perp_dir = -perp_dir;
         }
 
-        inOutEdge.Add(new Edge() { p0 = p0, p1 = p1, normal = (n1 + n2) * 0.5f, perp = perp_dir });
+        inOutEdge.Add(new Edge() { p0 = p0, p1 = p1, normal = (n1 + n2) * 0.5f, perp = perp_dir.normalized });
 
         return true;
     }
 
     void MatchSourceGeometry()
     {
-        Mesh mesh = (sourceMesh) ? (sourceMesh.sharedMesh) : (null);
-        if (mesh == null) return;
+        if (meshOctree == null) return;
 
         var sourceEdges = inOutEdge;
         inOutEdge = new List<Edge>();
 
+        UnityEditor.EditorUtility.DisplayProgressBar("Building...", $"Generating source mesh topology...", 0.77f);
+
         var topology = new Topology(sourceMesh.sharedMesh);
+
+        UnityEditor.EditorUtility.DisplayProgressBar("Building...", $"Filtering topology...", 0.78f);
         topology.ComputeTriangleNormals();
+
+        float cosSlopeTolerance = Mathf.Cos(Mathf.Deg2Rad * agentMaxSlope);
         float cosDirectionTolerance = Mathf.Cos(directionAngleTolerance * Mathf.Deg2Rad);
         float cosNormalTolerance = Mathf.Cos(normalAngleTolerance * Mathf.Deg2Rad);
         float toleranceRange = 15.0f * agentRadius;
 
         int edgeId = 0;
 
+        Debug.Log($"{sourceEdges.Count} source edges, {topology.nEdges} edges in original geometry ");
+
         foreach (var edge in sourceEdges)
         {
             edgeId++;
+
+            UnityEditor.EditorUtility.DisplayProgressBar("Building...", $"Matching source geometry... ({edgeId} of {sourceEdges.Count})", 0.78f + 0.2f * (float)edgeId / sourceEdges.Count);
 
             if ((debugEdges) && (debugEdgeId != -1) && (debugEdgeId != edgeId)) continue;
 
@@ -1026,29 +1072,56 @@ public class VoxelizerTest : MonoBehaviour
             // Find candidates
             var edgeDir = (edge.p1 - edge.p0).normalized;
 
-            int subEdgeId = 0;
+            List<(int, Vector3, int, Vector3)> candidateEdges = new List<(int, Vector3, int, Vector3)>();
 
             for (int i = 0; i < topology.nEdges; i++)
             {
-                var otherEdge = topology.GetEdge(i);
-                var e1 = otherEdge.Item1;
-                var e2 = otherEdge.Item2;
+                var otherEdgeStruct = topology.GetEdgeStruct(i);
+                // Check if this is a valid edge to consider
+                if (otherEdgeStruct.triangles.Count > 1)
+                {
+                    Vector3 baseNormal = otherEdgeStruct.triangles[0].normal;
+                    bool    isBoundary = true;
+                    for (int k = 1; k < otherEdgeStruct.triangles.Count; k++)
+                    {
+                        if (Vector3.Dot(baseNormal, otherEdgeStruct.triangles[k].normal) > cosSlopeTolerance)
+                        {
+                            isBoundary = false;
+                            break;
+                        }
+                    }
+                    if (!isBoundary) continue;
+                }
+
+                var otherEdge = topology.GetEdgeWithIndices(i);
+                var e1 = otherEdge.Item2;
+                var e2 = otherEdge.Item4;
 
                 if (Vector3.Distance(e1, edgeStart) > Vector3.Distance(e2, edgeStart))
                 {
                     // Switch edges
-                    e1 = otherEdge.Item2;
-                    e2 = otherEdge.Item1;
+                    e1 = otherEdge.Item4;
+                    e2 = otherEdge.Item2;
+
+                    int swap = otherEdge.Item1;
+                    otherEdge.Item1 = otherEdge.Item3;
+                    otherEdge.Item3 = swap;
+                    otherEdge.Item2 = e1;
+                    otherEdge.Item4 = e2;
                 }
 
                 if ((Vector3.Distance(e1, edgeCenter) > toleranceRange) ||
                     (Vector3.Distance(e2, edgeCenter) > toleranceRange)) continue;
 
+                // Remove edges that exceed a certain vertical threshould (we never want this, I believe, even if the heuristic then 
+                // throws it away
+                if (Mathf.Abs(edgeCenter.y - (e1.y + e2.y) * 0.5f) > agentStep * 2.0f) continue;
+
                 var eC = (e1 + e2) * 0.5f;
 
                 // Check direction tolerance
-                float dp = Vector3.Dot((e2 - e1).normalized, edgeDir);
-                if ((dp > cosDirectionTolerance) || (-dp > cosDirectionTolerance))
+                float dp = Mathf.Abs(Vector3.Dot((e2 - e1).normalized, edgeDir));
+                if (dp > cosDirectionTolerance)
                 {
                     // Check normal tolerance
                     dp = Mathf.Abs(Vector3.Dot(topology.GetEdgeNormal(i), edge.normal));
@@ -1058,124 +1131,312 @@ public class VoxelizerTest : MonoBehaviour
                         // Check if center of candidate is in front of the current edge
                         if (Vector3.Dot((eC - edgeCenter).normalized, edge.perp) > 0)
                         {
-                            subEdgeId++;
+                            candidateEdges.Add(otherEdge);
 
-                            debugEdgeList.Add(new DebugEdge() { color = Color.green, edgeId = edgeId, subEdgeId = subEdgeId, start = e1, end = e2 });
-
-                            // Project both edges to the XZ plane
-                            var edgeStartXZ = edgeStart.x0z();
-                            var edgeEndXZ = edgeEnd.x0z();
-                            var perp = edge.perp.x0z();
-                            var e1XZ = e1.x0z();
-                            var e2XZ = e2.x0z();
-                            Vector3 intersection;
-                            float   t;
-                            float   intersectionScore = 0.0f;
-
-                            if (Line.Raycast(edgeStartXZ, perp, toleranceRange, e1XZ, e2XZ, out intersection, out t))
-                            {
-                                e1 = Line.GetClosestPoint(e1, e2, edgeStart + t * edge.perp);
-
-                                intersectionScore += 4;
-                            }
-                            if (Line.Raycast(edgeEndXZ, perp, toleranceRange, e1XZ, e2XZ, out intersection, out t))
-                            {
-                                e2 = Line.GetClosestPoint(e1, e2, edgeEnd + t * edge.perp);
-
-                                intersectionScore += 4;
-                            }
-
-                            // The larger the distance, the larger the score
-                            float distanceScore = Vector3.Dot(eC.x0z() - edgeStartXZ, edge.perp);
-                            // The larger the difference in Y, the lower the score
-                            float yScore = -Mathf.Abs(eC.y - edgeCenter.y);
-                            float lengthScore = -Mathf.Abs(Vector3.Distance(e1, e2) - edgeLength);
-
-                            float edgeScore = intersectionScore + distanceScore + (yScore * 10) + lengthScore;
-
-                            //Debug.Log($"Score= {edgeScore} / DeltaY = {yScore} / D = {distanceScore} / DiffLength = {lengthScore} / Intersections = {intersectionScore}");
-
-                            if (score < edgeScore)
-                            {
-                                candidateStart = e1;
-                                candidateEnd = e2;
-                                candidateNormal = edge.normal;
-                                candidatePerp = edge.perp;
-                                score = edgeScore;
-
-                                //Debug.Log($"Best score so far: {score}");
-                            }
-
-                            debugEdgeList.Add(new DebugEdge() { color = Color.yellow, edgeId = edgeId, subEdgeId = subEdgeId, start = e1, end = e2 });
+                            //if (candidateEdges.Count > 100) break;
                         }
                     }
                 }
             }
 
-            if (score > -float.MaxValue)
+            // Merge candidates
+            if (mergeCandidates)
             {
-                /*if (raycastEdgeEndpoints)
+                Debug.Log($"Candidate Edges = {candidateEdges.Count}");
+                MergeCandidateEdges(candidateEdges);
+                Debug.Log($"Candidate Edges = {candidateEdges.Count}");
+            }
+
+            int subEdgeId = 0;
+
+            foreach (var otherEdge in candidateEdges)
+            {
+                subEdgeId++;
+
+                var e1 = otherEdge.Item2;
+                var e2 = otherEdge.Item4;
+
+                debugEdgeList.Add(new DebugEdge() { color = Color.green, edgeId = edgeId, subEdgeId = subEdgeId, start = e1, end = e2 });
+
+                var eC = (e1 + e2) * 0.5f;
+                var eD = (e2 - e1).normalized;
+
+                // Project both edges to the XZ plane
+                var edgeStartXZ = edgeStart.x0z();
+                var edgeEndXZ = edgeEnd.x0z();
+                var perp = edge.perp.x0z();
+                var e1XZ = e1.x0z();
+                var e2XZ = e2.x0z();
+                Vector3 intersection;
+                float   tRay;
+                float   tLine;
+                float   intersectionScore = 0.0f;
+
+                if (Line.Raycast(edgeStartXZ, perp, toleranceRange, e1XZ, e2XZ, out intersection, out tRay, out tLine))
                 {
-                    // Do the raycast on both directions along the edge to see if we need to "reduce" the edge to fit
-                    Vector3 dir = (candidateEnd - candidateStart).normalized;
-                    float candidateLength = (candidateP1 - candidateP0).magnitude;
-                    Vector3 candidateCenter = (candidateP1 + candidateP0) * 0.5f;
-                    candidateCenter.y += raycastEdgeEndpointsHeight;
+                    var pt = Line.GetClosestPoint(e1, e2, edgeStart + tRay * edge.perp);
+                    if (Vector3.Dot(eD, edgeDir) > 0)
+                        e1 = pt;
+                    else
+                        e2 = pt;
 
-                    int submeshId, triHit;
-                    float t;
-                    bool b1 = mesh.Raycast(candidateCenter, dir, candidateLength * 0.5f, out submeshId, out triHit, out t);
+                    intersectionScore += 3;
+                }
+                else
+                {
+                    // Compute distance fom ray (how close the raycast was of hitting)
+                    if (tLine < 0) tLine = Mathf.Abs(tLine) * (e2XZ - e1XZ).magnitude;
+                    else if (tLine > 1) tLine = (tLine - 1) * (e2XZ - e1XZ).magnitude;
+                    tLine = 1 - Mathf.Clamp01(tLine / agentRadius);
 
-                    if ((detectInOutProbeDebugView) &&
-                        ((detectInOutProbeDebugViewEdgeIndex <= 0) || (detectInOutProbeDebugViewEdgeIndex == edgeId)))
+                    intersectionScore += 3 * tLine;
+                }
+                if (Line.Raycast(edgeEndXZ, perp, toleranceRange, e1XZ, e2XZ, out intersection, out tRay, out tLine))
+                {
+                    var pt = Line.GetClosestPoint(e1, e2, edgeEnd + tRay * edge.perp);
+                    if (Vector3.Dot(eD, edgeDir) > 0)
+                        e2 = pt;
+                    else
+                        e1 = pt;
+
+                    intersectionScore += 3;
+                }
+                else
+                {
+                    // Compute distance fom ray (how close the raycast was of hitting)
+                    if (tLine < 0) tLine = Mathf.Abs(tLine) * (e2XZ - e1XZ).magnitude;
+                    else if (tLine > 1) tLine = (tLine - 1) * (e2XZ - e1XZ).magnitude;
+                    tLine = 1 - Mathf.Clamp01(tLine / agentRadius);
+
+                    intersectionScore += 3 * tLine;
+                }
+
+/*                if (debugSubEdgeId != -1)
+                {
+                    if (subEdgeId == debugEdgeId)
                     {
                         debugRays.Add(new DebugRay()
                         {
-                            color = new Color(1.0f, 0.5f, 1.0f),
-                            start = candidateCenter,
-                            dir = dir,
-                            dist = candidateLength * 0.5f,
-                            hit = b1,
-                            t = t,
-                            mesh = mesh,
-                            submeshId = submeshId,
-                            triId = triHit
+                            color = Color.cyan,
+                            start = edgeStart,
+                            dir = perp,
+                            dist = toleranceRange,
+                            hit = false,
+                            t = float.MaxValue,
+                            triangle = null
                         });
-                    }
-
-                    bool b2 = mesh.Raycast(candidateCenter, -dir, candidateLength * 0.5f, out submeshId, out triHit, out t);
-
-                    if ((detectInOutProbeDebugView) &&
-                        ((detectInOutProbeDebugViewEdgeIndex <= 0) || (detectInOutProbeDebugViewEdgeIndex == edgeId)))
-                    {
                         debugRays.Add(new DebugRay()
                         {
-                            color = new Color(1.0f, 0.5f, 1.0f),
-                            start = candidateCenter,
-                            dir = -dir,
-                            dist = candidateLength * 0.5f,
-                            hit = b1,
-                            t = t,
-                            mesh = mesh,
-                            submeshId = submeshId,
-                            triId = triHit
+                            color = Color.cyan,
+                            start = edgeEnd,
+                            dir = perp,
+                            dist = toleranceRange,
+                            hit = false,
+                            t = float.MaxValue,
+                            triangle = null
                         });
-                    }
-
-                    if (b1)
-                    {
-                        candidateEnd = candidateCenter + dir * t;
-                        candidateEnd.y -= raycastEdgeEndpointsHeight;
-                    }
-
-                    if (b2)
-                    {
-                        candidateStart = candidateCenter - dir * t;
-                        candidateStart.y -= raycastEdgeEndpointsHeight;
                     }
                 }*/
 
+                // The larger the distance, the larger the score
+                float distanceScore = Vector3.Dot(eC.x0z() - edgeStartXZ, edge.perp);
+                // The larger the difference in Y, the lower the score
+                float yScore = -Mathf.Abs(eC.y - edgeCenter.y);
+                // Penalize differences in length, until the maximum size
+                float lengthScore = Mathf.Min(0, (Vector3.Distance(e1, e2) - edgeLength));
+                // The larger the angular difference, the lower the score (we can use the perp with the direction, because we want it 
+                // to be larger with the difference, not with the similarity)
+                float angleScore = -Mathf.Abs(Vector3.Dot(perp, (e2XZ - e1XZ).normalized)) * 20.0f;
+
+                float edgeScore = intersectionScore + distanceScore + (yScore * 10) + lengthScore + angleScore;
+
+                //Debug.Log($"Score ({subEdgeId})= {edgeScore} / DeltaY = {yScore} / D = {distanceScore} / DiffLength = {lengthScore} / Intersections = {intersectionScore} / Angle = {angleScore}");
+
+                if (score < edgeScore)
+                {
+                    candidateStart = e1;
+                    candidateEnd = e2;
+                    candidateNormal = edge.normal;
+                    candidatePerp = edge.perp;
+                    score = edgeScore;
+
+                    //Debug.Log($"Best score so far: {score}/{subEdgeId}");
+                }
+
+                //debugEdgeList.Add(new DebugEdge() { color = Color.yellow, edgeId = edgeId, subEdgeId = -1, start = e1, end = e2 });
+            }
+
+            if (score > -float.MaxValue)
+            {
                 inOutEdge.Add(new Edge() { p0 = candidateStart, p1 = candidateEnd, normal = candidateNormal, perp = candidatePerp });
+            }
+        }
+    }
+
+    void MergeEdges()
+    {
+        float   cosTolerance = Mathf.Cos(Mathf.Deg2Rad * mergeAngleTolerance);
+        float   dist = mergeDistanceTolerance * agentRadius;
+        bool    retry = true;
+
+        while (retry)
+        {
+            retry = false;
+
+            for (int i = 0; i < inOutEdge.Count; i++)
+            {
+                var currentEdge = inOutEdge[i];
+
+                for (int j = i + 1; j < inOutEdge.Count; j++)
+                {
+                    var otherEdge = inOutEdge[j];
+
+                    // Check if the angles are different. Compare perpendicular angles, it's the same as direction in this case
+                    // If not, skip this candidate
+                    if (Vector3.Dot(currentEdge.perp, otherEdge.perp) < cosTolerance) continue;
+
+                    // Check if endpoints are close
+                    if (Vector3.Distance(currentEdge.p0, otherEdge.p0) < dist)
+                    {
+                        // p0 of both edges "match", build merge edge and remove the other edge
+                        currentEdge.p0 = otherEdge.p1;
+                        retry = true;
+                    }
+                    else if (Vector3.Distance(currentEdge.p1, otherEdge.p0) < dist)
+                    {
+                        // p1 of one edge matches p0 of other edge
+                        currentEdge.p1 = otherEdge.p1;
+                        retry = true;
+                    }
+                    else if (Vector3.Distance(currentEdge.p0, otherEdge.p1) < dist)
+                    {
+                        // p0 of one edge matches p1 of other edge
+                        currentEdge.p0 = otherEdge.p0;
+                        retry = true;
+                    }
+                    else if (Vector3.Distance(currentEdge.p1, otherEdge.p1) < dist)
+                    {
+                        // p1 of both edges match
+                        currentEdge.p1 = otherEdge.p0;
+                        retry = true;
+                    }
+
+                    if (retry)
+                    {
+                        currentEdge.perp = (currentEdge.perp + otherEdge.perp).normalized;
+                        currentEdge.normal = (currentEdge.normal + otherEdge.normal).normalized;
+
+                        inOutEdge[i] = currentEdge;
+                        inOutEdge.RemoveAt(j);
+                        break;
+                    }
+                }
+
+                if (retry) break;
+            }
+        }
+    }
+
+    void MergeCandidateEdges(List<(int, Vector3, int, Vector3)> candidates)
+    {
+        float cosTolerance = Mathf.Cos(Mathf.Deg2Rad * 5);
+        bool retry = true;
+
+        while (retry)
+        {
+            retry = false;
+
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                var (currentI0, currentP0, currentI1, currentP1) = candidates[i];
+                var currentDir = (currentP1 - currentP0);
+                var currentLength = currentDir.magnitude;
+                currentDir /= currentLength;
+
+                for (int j = i + 1; j < candidates.Count; j++)
+                {
+                    var (otherI0, otherP0, otherI1, otherP1) = candidates[j];
+
+                    // Check if this edge can be merged (check indices)
+                    if ((currentI0 != otherI0) &&
+                        (currentI0 != otherI1) &&
+                        (currentI1 != otherI0) &&
+                        (currentI1 != otherI1)) continue;
+
+                    var otherDir = (otherP1 - otherP0);
+                    var otherLength = otherDir.magnitude;
+                    otherDir /= otherLength;
+
+                    // Check if the angles are different. 
+                    // If not, skip this candidate
+                    if (Mathf.Abs(Vector3.Dot(currentDir, otherDir)) < cosTolerance) continue;
+
+                    if (currentI0 == otherI0)
+                    {
+                        currentI0 = otherI1;
+                        currentP0 = otherP1;
+                        retry = true;
+                    }
+                    else if (currentI0 == otherI1)
+                    {
+                        currentI0 = otherI0;
+                        currentP0 = otherP0;
+                        retry = true;
+                    }
+                    else if (currentI1 == otherI0)
+                    {
+                        currentI1 = otherI1;
+                        currentP1 = otherP1;
+                        retry = true;
+                    }
+                    else if (currentI1 == otherI1)
+                    {
+                        currentI1 = otherI0;
+                        currentP1 = otherP1;
+                        retry = true;
+                    }
+
+                    /*float dist = Mathf.Min(currentLength, otherLength) * 0.05f;
+
+                    // Check if endpoints are close
+                    if (Vector3.Distance(currentEdge.Item4, otherEdge.Item2) < dist)
+                    {
+                        // p0 of both edges "match", build merge edge and remove the other edge
+                        currentEdge.Item2 = otherEdge.Item4;
+                        currentEdge.Item1 = otherEdge.Item3;
+                        retry = true;
+                    }
+                    else if (Vector3.Distance(currentEdge.Item4, otherEdge.Item2) < dist)
+                    {
+                        // p1 of one edge matches p0 of other edge
+                        currentEdge.Item4 = otherEdge.Item4;
+                        currentEdge.Item3 = otherEdge.Item3;
+                        retry = true;
+                    }
+                    else if (Vector3.Distance(currentEdge.Item2, otherEdge.Item4) < dist)
+                    {
+                        // p0 of one edge matches p1 of other edge
+                        currentEdge.Item2 = otherEdge.Item2;
+                        currentEdge.Item1 = otherEdge.Item1;
+                        retry = true;
+                    }
+                    else if (Vector3.Distance(currentEdge.Item4, otherEdge.Item4) < dist)
+                    {
+                        // p1 of both edges match
+                        currentEdge.Item4 = otherEdge.Item2;
+                        currentEdge.Item3 = otherEdge.Item1;
+                        retry = true;
+                    }*/
+
+                    if (retry)
+                    {
+                        candidates[i] = (currentI0, currentP0, currentI1, currentP1);
+                        candidates.RemoveAt(j);
+                        break;
+                    }
+                }
+
+                if (retry) break;
             }
         }
     }
@@ -1248,15 +1509,13 @@ public class VoxelizerTest : MonoBehaviour
                 Gizmos.DrawLine(ray.start, ray.start + ray.dir * ray.dist);
                 if (ray.hit)
                 {                    
-                    Gizmos.DrawSphere(ray.start + ray.dir * ray.t, 0.05f);
+                    Gizmos.DrawSphere(ray.start + ray.dir * ray.t, 0.01f);
 
-                    if ((ray.mesh) && (ray.submeshId >= 0) && (ray.triId >= 0))
-                    {
-                        var triangle = ray.mesh.GetTriangle(ray.submeshId, ray.triId);
-
-                        Gizmos.DrawLine(triangle.GetVertex(0), triangle.GetVertex(1));
-                        Gizmos.DrawLine(triangle.GetVertex(1), triangle.GetVertex(2));
-                        Gizmos.DrawLine(triangle.GetVertex(2), triangle.GetVertex(0));
+                    if (ray.triangle != null)
+                    { 
+                        Gizmos.DrawLine(ray.triangle.GetVertex(0), ray.triangle.GetVertex(1));
+                        Gizmos.DrawLine(ray.triangle.GetVertex(1), ray.triangle.GetVertex(2));
+                        Gizmos.DrawLine(ray.triangle.GetVertex(2), ray.triangle.GetVertex(0));
                     }
                 }
             }
@@ -1361,10 +1620,25 @@ public class VoxelizerTest : MonoBehaviour
             UnityEditor.Handles.matrix = navMeshDisplay.transform.localToWorldMatrix;
             Gizmos.matrix = navMeshDisplay.transform.localToWorldMatrix;
 
-            Gizmos.color = new Color(0.0f, 1.0f, 0.0f, 0.5f);
-            foreach (var sample in samplePoints)
+            foreach (var sampleList in samplePoints)
             {
-                Gizmos.DrawSphere(sample, inOutSampleLength * 0.5f);
+                foreach (var sample in sampleList.points)
+                {
+                    if ((sample.sampleId != debugSampleId) && (debugSampleId != -1)) continue;
+
+                    if (sample.canStart)
+                    {
+                        if (sample.canEnd) Gizmos.color = new Color(0.0f, 1.0f, 0.0f, 0.5f);
+                        else Gizmos.color = new Color(1.0f, 1.0f, 0.0f, 0.5f);
+                    }
+                    else
+                    {
+                        if (sample.canEnd) Gizmos.color = new Color(0.0f, 1.0f, 1.0f, 0.5f);
+                        else Gizmos.color = new Color(1.0f, 0.0f, 0.0f, 0.5f);
+                    }
+
+                    Gizmos.DrawSphere(sample.position, inOutSampleLength * 0.5f);
+                }
             }
 
             UnityEditor.Handles.matrix = prevMatrixHandles;
@@ -1391,5 +1665,43 @@ public class VoxelizerTest : MonoBehaviour
             UnityEditor.Handles.matrix = prevMatrixHandles;
             Gizmos.matrix = prevMatrixGizmos;
         }
+
+        /*if (meshOctree != null)
+        {
+            var prevMatrixHandles = UnityEditor.Handles.matrix;
+            var prevMatrixGizmos = Gizmos.matrix;
+
+            UnityEditor.Handles.matrix = navMeshDisplay.transform.localToWorldMatrix;
+            Gizmos.matrix = navMeshDisplay.transform.localToWorldMatrix;
+
+            Vector3 pt = new Vector3(1.187499f, 0.1081427f, 0.4017856f);
+            Vector3 d = new Vector3(0.241813f, 0.0f, 0.9687138f);
+            float l = 0.125f;
+
+            //Gizmos.color = Color.yellow;
+            //meshOctree.DrawGizmos(2);
+
+            Gizmos.color = Color.green;
+            Triangle triangle = null;
+            float    t = 0.0f;
+            bool b = meshOctree.RaycastWithGizmos(pt, d, l, ref triangle, ref t);
+            if (b)
+            {
+                Gizmos.color = Color.red;
+                triangle.DrawGizmo();
+            }
+
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawLine(pt, pt + d * l);
+
+            UnityEditor.Handles.matrix = prevMatrixHandles;
+            Gizmos.matrix = prevMatrixGizmos;
+        }*/
     }
+
+    /*[Button("Build Octree")]
+    void BuildOctree()
+    {
+        meshOctree = sourceMesh.sharedMesh.GetOctree(4);
+    }*/
 }
